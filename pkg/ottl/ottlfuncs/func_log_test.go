@@ -48,7 +48,7 @@ func Test_Log(t *testing.T) {
 		{
 			name:     "int64",
 			value:    int64(333),
-			expected: float64(math.Log(333)),
+			expected: math.Log(333),
 		},
 		{
 			name:     "float64",
