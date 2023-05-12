@@ -50,15 +50,23 @@ func logFunc[K any](target ottl.Getter[K]) ottl.ExprFunc[K] {
 
 		switch value := value.(type) {
 		case int64:
+			if value <= 0 {
+			    return nil, nil
+			}
 			return math.Log((float64)(value)), nil
 		case string:
 			fltValue, err := strconv.ParseFloat(value, 64)
 			if err != nil {
 				return nil, nil
 			}
-
+			if fltValue <= 0 {
+			    return nil, nil
+			}
 			return math.Log(fltValue), nil
 		case float64:
+			if value <= 0 {
+			    return nil, nil
+			}
 			return math.Log(value), nil
 		default:
 			return nil, nil

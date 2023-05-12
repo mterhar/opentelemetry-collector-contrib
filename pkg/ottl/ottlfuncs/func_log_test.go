@@ -71,6 +71,16 @@ func Test_Log(t *testing.T) {
 			expected: nil,
 		},
 		{
+			name:     "zero is undefined",
+			value:    0,
+			expected: nil,
+		},
+		{
+			name:     "negative is undefined",
+			value:    -30.3,
+			expected: nil,
+		},
+		{
 			name:     "nil",
 			value:    nil,
 			expected: nil,
