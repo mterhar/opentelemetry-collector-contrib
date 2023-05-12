@@ -28,7 +28,7 @@ type LogArguments[K any] struct {
 }
 
 func NewLogFactory[K any]() ottl.Factory[K] {
-	return ottl.NewFactory("Int", &LogArguments[K]{}, createLogFunction[K])
+	return ottl.NewFactory("Log", &LogArguments[K]{}, createLogFunction[K])
 }
 
 func createLogFunction[K any](_ ottl.FunctionContext, oArgs ottl.Arguments) (ottl.ExprFunc[K], error) {
