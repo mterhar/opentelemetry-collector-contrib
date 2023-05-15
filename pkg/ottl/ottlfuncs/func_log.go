@@ -69,7 +69,7 @@ func logFunc[K any](target ottl.Getter[K]) ottl.ExprFunc[K] {
 			}
 			return math.Log(value), nil
 		default:
-			return nil, fmt.Errorf("unhanded type %T", value)
+			return nil, fmt.Errorf("unhanlded type %T", value)
 		}
 	}
 }

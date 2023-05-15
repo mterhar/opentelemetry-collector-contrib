@@ -86,12 +86,12 @@ func Test_Log(t *testing.T) {
 		{
 			name:     "zero is undefined",
 			value:    0,
-			expected: nil,
+			expected: "greater than zero",
 		},
 		{
 			name:     "negative is undefined",
 			value:    -30.3,
-			expected: nil,
+			expected: "greater than zero",
 		},
 		{
 			name:     "nil",
@@ -112,7 +112,7 @@ func Test_Log(t *testing.T) {
 				},
 			})
 			result, err := exprFunc(nil, nil)
-			assert.Error(t, err, tt.expected)
+			assert.ErrorContains(t, err, tt.expected)
 			assert.Equal(t, nil, result)
 		})
 	}
