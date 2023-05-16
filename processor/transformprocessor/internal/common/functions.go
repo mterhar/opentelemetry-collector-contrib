@@ -29,6 +29,7 @@ func Functions[K any]() map[string]ottl.Factory[K] {
 		ottlfuncs.NewConcatFactory[K](),
 		ottlfuncs.NewSplitFactory[K](),
 		ottlfuncs.NewIntFactory[K](),
+		ottlfuncs.NewLogFactory[K](),
 		ottlfuncs.NewConvertCaseFactory[K](),
 		ottlfuncs.NewParseJSONFactory[K](),
 		ottlfuncs.NewSubstringFactory[K](),

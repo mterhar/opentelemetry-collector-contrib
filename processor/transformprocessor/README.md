@@ -87,6 +87,8 @@ transform:
         - replace_match(attributes["http.target"], "/user/*/list/*", "/user/{userId}/list/{listId}")
         - limit(attributes, 100, [])
         - truncate_all(attributes, 4096)
+        - set(attributes["tp.duration"], end_time_unix_nano - start_time_unix_nano)
+        - set(attributes["tp.duration_log10"], Log(attributes["tp.duration"]))
 
   metric_statements:
     - context: resource

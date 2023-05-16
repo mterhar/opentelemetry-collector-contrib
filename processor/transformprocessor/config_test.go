@@ -45,6 +45,7 @@ func TestLoadConfig(t *testing.T) {
 						Statements: []string{
 							`set(name, "bear") where attributes["http.path"] == "/animal"`,
 							`keep_keys(attributes, ["http.method", "http.path"])`,
+							`set(attributes["logarithm120"], Log(120))`,
 						},
 					},
 					{
