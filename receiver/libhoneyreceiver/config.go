@@ -34,7 +34,7 @@ type HTTPConfig struct {
 // Validate ensures the HTTP configuration is set.
 func (cfg *Config) Validate() error {
 	if cfg.HTTP == nil {
-		return errors.New("must specify at least one protocol when using the arbitrary JSON receiver")
+		return errors.New("must specify at least one protocol when using the libhoney receiver")
 	}
 	return nil
 }
