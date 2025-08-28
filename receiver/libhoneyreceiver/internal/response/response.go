@@ -32,7 +32,7 @@ func MakeSuccessResponse(numEvents int) []ResponseInBatch {
 	}
 
 	responses := make([]ResponseInBatch, numEvents)
-	for i := range numEvents {
+	for i := 0; i < numEvents; i++ {
 		responses[i] = ResponseInBatch{Status: http.StatusAccepted}
 	}
 	return responses
