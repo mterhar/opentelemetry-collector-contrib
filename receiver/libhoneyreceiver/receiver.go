@@ -290,6 +290,8 @@ func (r *libhoneyReceiver) handleEvent(resp http.ResponseWriter, req *http.Reque
 		}
 
 		if len(libhoneyevents) > 0 {
+			// Debug: Log the state of MsgPackTimestamp
+			r.settings.Logger.Debug("JSON event decoded", zap.Bool("has_msgpacktimestamp", libhoneyevents[0].MsgPackTimestamp != nil))
 			if libhoneyevents[0].MsgPackTimestamp != nil {
 				r.settings.Logger.Debug("Decoding with json worked", zap.Time("timestamp.first.msgpacktimestamp", *libhoneyevents[0].MsgPackTimestamp), zap.String("timestamp.first.time", libhoneyevents[0].Time))
 			} else {
