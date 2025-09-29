@@ -13,6 +13,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"runtime/debug"
 	"strings"
 	"sync"
 
@@ -72,16 +73,12 @@ func (r *libhoneyReceiver) startHTTPServer(ctx context.Context, host component.H
 	httpCfg := r.cfg.HTTP.Get()
 	r.settings.Logger.Info("r.nextTraces is not null so httpTracesReceiver was added", zap.Int("paths", len(httpCfg.TracesURLPaths)))
 	for _, path := range httpCfg.TracesURLPaths {
-		httpMux.HandleFunc(path, func(resp http.ResponseWriter, req *http.Request) {
-			r.handleEvent(resp, req)
-		})
+		httpMux.HandleFunc(path, r.withPanicRecovery(r.handleEvent))
 		r.settings.Logger.Debug("Added path to HTTP server", zap.String("path", path))
 	}
 
 	if r.cfg.AuthAPI != "" {
-		httpMux.HandleFunc("/1/auth", func(resp http.ResponseWriter, req *http.Request) {
-			r.handleAuth(resp, req)
-		})
+		httpMux.HandleFunc("/1/auth", r.withPanicRecovery(r.handleAuth))
 	}
 
 	var err error
@@ -134,11 +131,79 @@ func (r *libhoneyReceiver) registerLogConsumer(tc consumer.Logs) {
 	r.nextLogs = tc
 }
 
+// getSourceIP extracts the source IP address from the request
+// It checks X-Forwarded-For and X-Real-IP headers first, then falls back to RemoteAddr
+func getSourceIP(req *http.Request) string {
+	// Check X-Forwarded-For header (can contain multiple IPs)
+	if xff := req.Header.Get("X-Forwarded-For"); xff != "" {
+		// Take the first IP if there are multiple
+		if idx := strings.Index(xff, ","); idx != -1 {
+			return strings.TrimSpace(xff[:idx])
+		}
+		return strings.TrimSpace(xff)
+	}
+
+	// Check X-Real-IP header
+	if xri := req.Header.Get("X-Real-IP"); xri != "" {
+		return xri
+	}
+
+	// Fall back to RemoteAddr
+	// RemoteAddr is in the format "IP:port", so we need to extract just the IP
+	if host, _, err := net.SplitHostPort(req.RemoteAddr); err == nil {
+		return host
+	}
+
+	// If splitting fails, return RemoteAddr as-is
+	return req.RemoteAddr
+}
+
+// withPanicRecovery wraps an HTTP handler with panic recovery middleware
+func (r *libhoneyReceiver) withPanicRecovery(handler http.HandlerFunc) http.HandlerFunc {
+	return func(resp http.ResponseWriter, req *http.Request) {
+		defer func() {
+			if panicVal := recover(); panicVal != nil {
+				// Extract source IP
+				sourceIP := getSourceIP(req)
+
+				// Log the panic with stack trace, source IP, and user agent
+				r.settings.Logger.Error("Panic in request handler",
+					zap.Any("panic", panicVal),
+					zap.String("source_ip", sourceIP),
+					zap.String("user_agent", req.Header.Get("User-Agent")),
+					zap.String("method", req.Method),
+					zap.String("url", req.URL.String()),
+					zap.String("content-encoding", req.Header.Get("Content-Encoding")),
+					zap.String("stack_trace", string(debug.Stack())))
+
+				// Return a proper error response
+				resp.Header().Set("Content-Type", "application/json")
+				resp.WriteHeader(http.StatusBadRequest)
+
+				// Write libhoney-compatible error response
+				errorResponse := []response.ResponseInBatch{{
+					ErrorStr: "failed to process request: internal error during decompression",
+					Status:   http.StatusBadRequest,
+				}}
+
+				responseBody, _ := json.Marshal(errorResponse)
+				_, _ = resp.Write(responseBody)
+			}
+		}()
+
+		handler(resp, req)
+	}
+}
+
 func (r *libhoneyReceiver) handleAuth(resp http.ResponseWriter, req *http.Request) {
 	r.settings.Logger.Debug("handling auth request", zap.String("auth_api", r.cfg.AuthAPI))
 	authURL := fmt.Sprintf("%s/1/auth", r.cfg.AuthAPI)
 	authReq, err := http.NewRequest(http.MethodGet, authURL, http.NoBody)
 	if err != nil {
+		r.settings.Logger.Error("Failed to create auth request",
+			zap.Error(err),
+			zap.String("source_ip", getSourceIP(req)),
+			zap.String("user_agent", req.Header.Get("User-Agent")))
 		errJSON, _ := json.Marshal(`{"error": "failed to create auth request"}`)
 		writeResponse(resp, "json", http.StatusBadRequest, errJSON)
 		return
@@ -147,6 +212,10 @@ func (r *libhoneyReceiver) handleAuth(resp http.ResponseWriter, req *http.Reques
 	var authClient http.Client
 	authResp, err := authClient.Do(authReq)
 	if err != nil {
+		r.settings.Logger.Error("Failed to send auth request",
+			zap.Error(err),
+			zap.String("source_ip", getSourceIP(req)),
+			zap.String("user_agent", req.Header.Get("User-Agent")))
 		errJSON, _ := json.Marshal(fmt.Sprintf(`"error": "failed to send request to auth api endpoint", "message", %q}`, err.Error()))
 		writeResponse(resp, "json", http.StatusBadRequest, errJSON)
 		return
@@ -155,10 +224,18 @@ func (r *libhoneyReceiver) handleAuth(resp http.ResponseWriter, req *http.Reques
 
 	switch {
 	case authResp.StatusCode == http.StatusUnauthorized:
+		r.settings.Logger.Error("Auth request unauthorized",
+			zap.String("source_ip", getSourceIP(req)),
+			zap.String("user_agent", req.Header.Get("User-Agent")),
+			zap.Int("status_code", authResp.StatusCode))
 		errJSON, _ := json.Marshal(`"error": "received 401 response for authInfo request from Honeycomb API - check your API key"}`)
 		writeResponse(resp, "json", http.StatusBadRequest, errJSON)
 		return
 	case authResp.StatusCode > 299:
+		r.settings.Logger.Error("Bad response code from auth API",
+			zap.String("source_ip", getSourceIP(req)),
+			zap.String("user_agent", req.Header.Get("User-Agent")),
+			zap.Int("status_code", authResp.StatusCode))
 		errJSON, _ := json.Marshal(fmt.Sprintf(`"error": "bad response code from API", "status_code", %d}`, authResp.StatusCode))
 		writeResponse(resp, "json", http.StatusBadRequest, errJSON)
 		return
@@ -222,7 +299,10 @@ func (r *libhoneyReceiver) handleEvent(resp http.ResponseWriter, req *http.Reque
 				// Log the panic but don't expose internal details to the client
 				r.settings.Logger.Error("Panic during request body read (likely malformed compressed data)",
 					zap.Any("panic", panicVal),
-					zap.String("content-encoding", req.Header.Get("Content-Encoding")))
+					zap.String("source_ip", getSourceIP(req)),
+					zap.String("user_agent", req.Header.Get("User-Agent")),
+					zap.String("content-encoding", req.Header.Get("Content-Encoding")),
+					zap.String("stack_trace", string(debug.Stack())))
 				err = errors.New("failed to read request body: invalid compressed data")
 			}
 		}()
@@ -230,7 +310,11 @@ func (r *libhoneyReceiver) handleEvent(resp http.ResponseWriter, req *http.Reque
 	}()
 
 	if err != nil {
-		r.settings.Logger.Error("Failed to read request body", zap.Error(err))
+		r.settings.Logger.Error("Failed to read request body",
+			zap.Error(err),
+			zap.String("source_ip", getSourceIP(req)),
+			zap.String("user_agent", req.Header.Get("User-Agent")),
+			zap.String("content-encoding", req.Header.Get("Content-Encoding")))
 		writeLibhoneyError(resp, enc, "failed to read request body")
 		// Don't try to drain body if we got an error from compressed reader
 		// The reader may be in a corrupted state and cause another panic
@@ -239,7 +323,9 @@ func (r *libhoneyReceiver) handleEvent(resp http.ResponseWriter, req *http.Reque
 				defer func() {
 					if panicVal := recover(); panicVal != nil {
 						r.settings.Logger.Debug("Panic during body close after read error (expected with corrupted data)",
-							zap.Any("panic", panicVal))
+							zap.Any("panic", panicVal),
+							zap.String("source_ip", getSourceIP(req)),
+							zap.String("user_agent", req.Header.Get("User-Agent")))
 					}
 				}()
 				_ = req.Body.Close()
@@ -251,7 +337,9 @@ func (r *libhoneyReceiver) handleEvent(resp http.ResponseWriter, req *http.Reque
 		defer func() {
 			if panicVal := recover(); panicVal != nil {
 				r.settings.Logger.Error("Panic during request body close",
-					zap.Any("panic", panicVal))
+					zap.Any("panic", panicVal),
+					zap.String("source_ip", getSourceIP(req)),
+					zap.String("user_agent", req.Header.Get("User-Agent")))
 				writeLibhoneyError(resp, enc, "failed to close request body")
 				err = errors.New("panic during body close")
 			}
@@ -260,7 +348,10 @@ func (r *libhoneyReceiver) handleEvent(resp http.ResponseWriter, req *http.Reque
 	}()
 	if err != nil {
 		if !strings.Contains(err.Error(), "panic during body close") {
-			r.settings.Logger.Error("Failed to close request body", zap.Error(err))
+			r.settings.Logger.Error("Failed to close request body",
+				zap.Error(err),
+				zap.String("source_ip", getSourceIP(req)),
+				zap.String("user_agent", req.Header.Get("User-Agent")))
 			writeLibhoneyError(resp, enc, "failed to close request body")
 		}
 		return
@@ -273,7 +364,10 @@ func (r *libhoneyReceiver) handleEvent(resp http.ResponseWriter, req *http.Reque
 		decoder.UseLooseInterfaceDecoding(true)
 		err = decoder.Decode(&libhoneyevents)
 		if err != nil {
-			r.settings.Logger.Info("messagepack decoding failed")
+			r.settings.Logger.Info("messagepack decoding failed",
+				zap.Error(err),
+				zap.String("source_ip", getSourceIP(req)),
+				zap.String("user_agent", req.Header.Get("User-Agent")))
 			writeLibhoneyError(resp, enc, "failed to unmarshal msgpack")
 			return
 		}
@@ -285,6 +379,10 @@ func (r *libhoneyReceiver) handleEvent(resp http.ResponseWriter, req *http.Reque
 	case encoder.JSONContentType:
 		err = json.Unmarshal(body, &libhoneyevents)
 		if err != nil {
+			r.settings.Logger.Info("JSON decoding failed",
+				zap.Error(err),
+				zap.String("source_ip", getSourceIP(req)),
+				zap.String("user_agent", req.Header.Get("User-Agent")))
 			writeLibhoneyError(resp, enc, "failed to unmarshal JSON")
 			return
 		}
@@ -299,7 +397,10 @@ func (r *libhoneyReceiver) handleEvent(resp http.ResponseWriter, req *http.Reque
 			}
 		}
 	default:
-		r.settings.Logger.Info("unsupported content type", zap.String("content-type", req.Header.Get("Content-Type")))
+		r.settings.Logger.Info("unsupported content type",
+			zap.String("content-type", req.Header.Get("Content-Type")),
+			zap.String("source_ip", getSourceIP(req)),
+			zap.String("user_agent", req.Header.Get("User-Agent")))
 	}
 
 	// Parse events and track which original indices contributed to each OTLP entity
