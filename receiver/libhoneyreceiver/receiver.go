@@ -134,6 +134,11 @@ func (r *libhoneyReceiver) registerLogConsumer(tc consumer.Logs) {
 // getSourceIP extracts the source IP address from the request
 // It checks X-Forwarded-For and X-Real-IP headers first, then falls back to RemoteAddr
 func getSourceIP(req *http.Request) string {
+	// Safety check - return unknown if request is nil
+	if req == nil {
+		return "unknown"
+	}
+
 	// Check X-Forwarded-For header (can contain multiple IPs)
 	if xff := req.Header.Get("X-Forwarded-For"); xff != "" {
 		// Take the first IP if there are multiple
@@ -163,18 +168,27 @@ func (r *libhoneyReceiver) withPanicRecovery(handler http.HandlerFunc) http.Hand
 	return func(resp http.ResponseWriter, req *http.Request) {
 		defer func() {
 			if panicVal := recover(); panicVal != nil {
-				// Extract source IP
-				sourceIP := getSourceIP(req)
+				// Build log fields safely - avoid potential nil dereference
+				logFields := []zap.Field{
+					zap.Any("panic", panicVal),
+					zap.String("stack_trace", string(debug.Stack())),
+				}
+
+				// Only access req if it's not nil
+				if req != nil {
+					logFields = append(logFields,
+						zap.String("source_ip", getSourceIP(req)),
+						zap.String("user_agent", req.Header.Get("User-Agent")),
+						zap.String("method", req.Method),
+						zap.String("content-encoding", req.Header.Get("Content-Encoding")))
+
+					if req.URL != nil {
+						logFields = append(logFields, zap.String("url", req.URL.String()))
+					}
+				}
 
 				// Log the panic with stack trace, source IP, and user agent
-				r.settings.Logger.Error("Panic in request handler",
-					zap.Any("panic", panicVal),
-					zap.String("source_ip", sourceIP),
-					zap.String("user_agent", req.Header.Get("User-Agent")),
-					zap.String("method", req.Method),
-					zap.String("url", req.URL.String()),
-					zap.String("content-encoding", req.Header.Get("Content-Encoding")),
-					zap.String("stack_trace", string(debug.Stack())))
+				r.settings.Logger.Error("Panic in request handler", logFields...)
 
 				// Return a proper error response
 				resp.Header().Set("Content-Type", "application/json")
@@ -296,13 +310,22 @@ func (r *libhoneyReceiver) handleEvent(resp http.ResponseWriter, req *http.Reque
 	func() {
 		defer func() {
 			if panicVal := recover(); panicVal != nil {
-				// Log the panic but don't expose internal details to the client
-				r.settings.Logger.Error("Panic during request body read (likely malformed compressed data)",
+				// Build log fields safely - avoid potential nil dereference
+				logFields := []zap.Field{
 					zap.Any("panic", panicVal),
-					zap.String("source_ip", getSourceIP(req)),
-					zap.String("user_agent", req.Header.Get("User-Agent")),
-					zap.String("content-encoding", req.Header.Get("Content-Encoding")),
-					zap.String("stack_trace", string(debug.Stack())))
+					zap.String("stack_trace", string(debug.Stack())),
+				}
+
+				// Only access req if it's not nil
+				if req != nil {
+					logFields = append(logFields,
+						zap.String("source_ip", getSourceIP(req)),
+						zap.String("user_agent", req.Header.Get("User-Agent")),
+						zap.String("content-encoding", req.Header.Get("Content-Encoding")))
+				}
+
+				// Log the panic but don't expose internal details to the client
+				r.settings.Logger.Error("Panic during request body read (likely malformed compressed data)", logFields...)
 				err = errors.New("failed to read request body: invalid compressed data")
 			}
 		}()
@@ -322,10 +345,13 @@ func (r *libhoneyReceiver) handleEvent(resp http.ResponseWriter, req *http.Reque
 			func() {
 				defer func() {
 					if panicVal := recover(); panicVal != nil {
-						r.settings.Logger.Debug("Panic during body close after read error (expected with corrupted data)",
-							zap.Any("panic", panicVal),
-							zap.String("source_ip", getSourceIP(req)),
-							zap.String("user_agent", req.Header.Get("User-Agent")))
+						logFields := []zap.Field{zap.Any("panic", panicVal)}
+						if req != nil {
+							logFields = append(logFields,
+								zap.String("source_ip", getSourceIP(req)),
+								zap.String("user_agent", req.Header.Get("User-Agent")))
+						}
+						r.settings.Logger.Debug("Panic during body close after read error (expected with corrupted data)", logFields...)
 					}
 				}()
 				_ = req.Body.Close()
@@ -336,10 +362,13 @@ func (r *libhoneyReceiver) handleEvent(resp http.ResponseWriter, req *http.Reque
 	func() {
 		defer func() {
 			if panicVal := recover(); panicVal != nil {
-				r.settings.Logger.Error("Panic during request body close",
-					zap.Any("panic", panicVal),
-					zap.String("source_ip", getSourceIP(req)),
-					zap.String("user_agent", req.Header.Get("User-Agent")))
+				logFields := []zap.Field{zap.Any("panic", panicVal)}
+				if req != nil {
+					logFields = append(logFields,
+						zap.String("source_ip", getSourceIP(req)),
+						zap.String("user_agent", req.Header.Get("User-Agent")))
+				}
+				r.settings.Logger.Error("Panic during request body close", logFields...)
 				writeLibhoneyError(resp, enc, "failed to close request body")
 				err = errors.New("panic during body close")
 			}
