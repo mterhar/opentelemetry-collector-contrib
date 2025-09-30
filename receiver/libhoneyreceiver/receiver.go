@@ -81,8 +81,12 @@ func (r *libhoneyReceiver) startHTTPServer(ctx context.Context, host component.H
 		httpMux.HandleFunc("/1/auth", r.withPanicRecovery(r.handleAuth))
 	}
 
+	// Wrap the entire mux with top-level panic recovery to catch panics from middleware
+	// This catches panics that occur in the confighttp middleware stack (like decompression)
+	handlerWithRecovery := r.withTopLevelPanicRecovery(httpMux)
+
 	var err error
-	if r.server, err = httpCfg.ToServer(ctx, host, r.settings.TelemetrySettings, httpMux); err != nil {
+	if r.server, err = httpCfg.ToServer(ctx, host, r.settings.TelemetrySettings, handlerWithRecovery); err != nil {
 		return err
 	}
 
@@ -161,6 +165,67 @@ func getSourceIP(req *http.Request) string {
 
 	// If splitting fails, return RemoteAddr as-is
 	return req.RemoteAddr
+}
+
+// withTopLevelPanicRecovery wraps the entire HTTP handler (including middleware) with panic recovery
+// This catches panics from the confighttp middleware stack (decompression, etc)
+func (r *libhoneyReceiver) withTopLevelPanicRecovery(handler http.Handler) http.Handler {
+	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
+		defer func() {
+			if panicVal := recover(); panicVal != nil {
+				// Build log fields safely - avoid potential nil dereference
+				logFields := []zap.Field{
+					zap.Any("panic", panicVal),
+					zap.String("stack_trace", string(debug.Stack())),
+					zap.String("panic_location", "top_level_middleware"),
+				}
+
+				// Only access req if it's not nil
+				if req != nil {
+					logFields = append(logFields,
+						zap.String("source_ip", getSourceIP(req)),
+						zap.String("user_agent", req.Header.Get("User-Agent")),
+						zap.String("method", req.Method),
+						zap.String("content_encoding", req.Header.Get("Content-Encoding")),
+						zap.String("content_type", req.Header.Get("Content-Type")))
+
+					if req.URL != nil {
+						logFields = append(logFields,
+							zap.String("endpoint", req.URL.Path),
+							zap.String("full_url", req.URL.String()))
+					}
+				}
+
+				// Log the panic with stack trace, source IP, and user agent
+				r.settings.Logger.Error("Panic in HTTP middleware or handler", logFields...)
+
+				// Check if it's likely a decompression panic based on the panic message
+				panicStr := fmt.Sprintf("%v", panicVal)
+				errorMsg := "failed to process request: internal error during request processing"
+				if strings.Contains(panicStr, "match offset") ||
+				   strings.Contains(panicStr, "slice bounds") ||
+				   strings.Contains(panicStr, "nil pointer dereference") ||
+				   strings.Contains(panicStr, "invalid memory address") {
+					errorMsg = "failed to process request: internal error during decompression"
+				}
+
+				// Return a proper error response
+				resp.Header().Set("Content-Type", "application/json")
+				resp.WriteHeader(http.StatusBadRequest)
+
+				// Write libhoney-compatible error response
+				errorResponse := []response.ResponseInBatch{{
+					ErrorStr: errorMsg,
+					Status:   http.StatusBadRequest,
+				}}
+
+				responseBody, _ := json.Marshal(errorResponse)
+				_, _ = resp.Write(responseBody)
+			}
+		}()
+
+		handler.ServeHTTP(resp, req)
+	})
 }
 
 // withPanicRecovery wraps an HTTP handler with panic recovery middleware
@@ -312,10 +377,13 @@ func (r *libhoneyReceiver) handleEvent(resp http.ResponseWriter, req *http.Reque
 	}
 
 	// handleEvent is only called if an HTTP config is set, so HTTP must have a value.
-	httpCfg := r.cfg.HTTP.Get()
-	for _, p := range httpCfg.TracesURLPaths {
-		dataset = strings.Replace(dataset, p, "", 1)
-		r.settings.Logger.Debug("dataset parsed", zap.String("dataset.parsed", dataset))
+	// But during tests, if called directly, we need to handle this safely
+	if r.cfg.HTTP.HasValue() {
+		httpCfg := r.cfg.HTTP.Get()
+		for _, p := range httpCfg.TracesURLPaths {
+			dataset = strings.Replace(dataset, p, "", 1)
+			r.settings.Logger.Debug("dataset parsed", zap.String("dataset.parsed", dataset))
+		}
 	}
 	var body []byte
 	func() {

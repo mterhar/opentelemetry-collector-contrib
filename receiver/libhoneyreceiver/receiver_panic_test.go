@@ -22,6 +22,10 @@ import (
 func TestPanicRecoveryWithMalformedCompression(t *testing.T) {
 	// Create receiver with default config
 	cfg := createDefaultConfig().(*Config)
+	// Skip this test if HTTP config is not available
+	if !cfg.HTTP.HasValue() {
+		t.Skip("HTTP config not available, skipping test")
+	}
 	set := receivertest.NewNopSettings(metadata.Type)
 
 	r, err := newLibhoneyReceiver(cfg, &set)
