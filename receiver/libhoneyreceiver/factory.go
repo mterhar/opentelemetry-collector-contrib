@@ -41,8 +41,10 @@ func createDefaultConfig() component.Config {
 	return &Config{
 		HTTP: configoptional.Default(HTTPConfig{
 			ServerConfig: confighttp.ServerConfig{
-				Endpoint:              endpointStr,
-				CompressionAlgorithms: []string{"", "zstd", "gzip", "deflate"},
+				Endpoint: endpointStr,
+				// Disable automatic decompression - we handle it ourselves for better error handling
+				// Empty array means the middleware won't decompress anything
+				CompressionAlgorithms: []string{},
 			},
 			TracesURLPaths: defaultTracesURLPaths,
 		}),

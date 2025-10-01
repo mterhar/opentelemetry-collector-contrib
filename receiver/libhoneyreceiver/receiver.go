@@ -5,6 +5,8 @@ package libhoneyreceiver // import "github.com/open-telemetry/opentelemetry-coll
 
 import (
 	"bytes"
+	"compress/flate"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,6 +19,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/klauspost/compress/zstd"
 	"github.com/vmihailenco/msgpack/v5"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/component/componentstatus"
@@ -48,6 +51,53 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// decompressBody decompresses the request body based on Content-Encoding header
+// Returns the decompressed body, detected compression type, and any error
+func decompressBody(body io.ReadCloser, contentEncoding string) ([]byte, string, error) {
+	// If no encoding specified, read directly
+	if contentEncoding == "" || contentEncoding == "identity" {
+		data, err := io.ReadAll(body)
+		return data, "none", err
+	}
+
+	var reader io.Reader
+	var detectedType string
+
+	switch strings.ToLower(contentEncoding) {
+	case "gzip":
+		gr, err := gzip.NewReader(body)
+		if err != nil {
+			return nil, "gzip", fmt.Errorf("failed to create gzip reader: %w", err)
+		}
+		defer gr.Close()
+		reader = gr
+		detectedType = "gzip"
+
+	case "deflate":
+		reader = flate.NewReader(body)
+		detectedType = "deflate"
+
+	case "zstd":
+		zr, err := zstd.NewReader(body)
+		if err != nil {
+			return nil, "zstd", fmt.Errorf("failed to create zstd reader: %w", err)
+		}
+		defer zr.Close()
+		reader = zr
+		detectedType = "zstd"
+
+	default:
+		return nil, contentEncoding, fmt.Errorf("unsupported content encoding: %s", contentEncoding)
+	}
+
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, detectedType, fmt.Errorf("decompression failed: %w", err)
+	}
+
+	return data, detectedType, nil
 }
 
 func newLibhoneyReceiver(cfg *Config, set *receiver.Settings) (*libhoneyReceiver, error) {
@@ -175,92 +225,10 @@ func getSourceIP(req *http.Request) string {
 	return req.RemoteAddr
 }
 
-// captureRawBodyOnError wraps the request body to capture raw bytes if decompression fails
-type captureRawBodyOnError struct {
-	originalBody io.ReadCloser
-	buffer       *bytes.Buffer
-	teeReader    io.Reader
-	maxCapture   int
-}
-
-func newCaptureRawBodyOnError(body io.ReadCloser, maxCapture int) *captureRawBodyOnError {
-	buf := &bytes.Buffer{}
-	return &captureRawBodyOnError{
-		originalBody: body,
-		buffer:       buf,
-		teeReader:    io.TeeReader(body, buf),
-		maxCapture:   maxCapture,
-	}
-}
-
-func (c *captureRawBodyOnError) Read(p []byte) (n int, err error) {
-	// Defensive: if buffer is nil, just pass through
-	if c == nil || c.originalBody == nil {
-		return 0, io.EOF
-	}
-
-	// Stop capturing if we've exceeded maxCapture
-	if c.buffer != nil && c.buffer.Len() >= c.maxCapture {
-		return c.originalBody.Read(p)
-	}
-
-	if c.teeReader != nil {
-		return c.teeReader.Read(p)
-	}
-
-	return c.originalBody.Read(p)
-}
-
-func (c *captureRawBodyOnError) Close() error {
-	if c == nil || c.originalBody == nil {
-		return nil
-	}
-	return c.originalBody.Close()
-}
-
-func (c *captureRawBodyOnError) GetCapturedBytes() []byte {
-	if c == nil || c.buffer == nil {
-		return nil
-	}
-
-	// Safely get bytes with additional bounds checking
-	defer func() {
-		if r := recover(); r != nil {
-			// If something goes wrong reading the buffer, return empty
-			return
-		}
-	}()
-
-	captured := c.buffer.Bytes()
-	if captured == nil || len(captured) == 0 {
-		return nil
-	}
-
-	if len(captured) > c.maxCapture {
-		// Make a copy to be safe
-		result := make([]byte, c.maxCapture)
-		copy(result, captured[:c.maxCapture])
-		return result
-	}
-
-	// Return a copy to avoid any potential buffer reuse issues
-	result := make([]byte, len(captured))
-	copy(result, captured)
-	return result
-}
-
 // withTopLevelPanicRecovery wraps the entire HTTP handler (including middleware) with panic recovery
-// This catches panics from the confighttp middleware stack (decompression, etc)
+// This catches panics from the confighttp middleware stack
 func (r *libhoneyReceiver) withTopLevelPanicRecovery(handler http.Handler) http.Handler {
 	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
-		// For compressed requests, wrap the body to capture raw bytes if decompression fails
-		var bodyCapture *captureRawBodyOnError
-		contentEncoding := req.Header.Get("Content-Encoding")
-		if contentEncoding != "" && contentEncoding != "identity" && req.Body != nil {
-			bodyCapture = newCaptureRawBodyOnError(req.Body, 512) // Capture first 512 bytes
-			req.Body = bodyCapture
-		}
-
 		defer func() {
 			if panicVal := recover(); panicVal != nil {
 				// Build log fields safely - avoid potential nil dereference
@@ -285,60 +253,6 @@ func (r *libhoneyReceiver) withTopLevelPanicRecovery(handler http.Handler) http.
 							zap.String("endpoint", req.URL.Path),
 							zap.String("full_url", req.URL.String()))
 					}
-				}
-
-				// If we captured raw bytes before decompression, include them
-				// Wrap in recovery to prevent panic-in-panic scenario
-				if bodyCapture != nil {
-					func() {
-						defer func() {
-							if r := recover(); r != nil {
-								// If capturing debug info panics, log that but don't propagate
-								logFields = append(logFields, zap.String("debug_capture_error", fmt.Sprintf("failed to extract raw bytes: %v", r)))
-							}
-						}()
-
-						rawBytes := bodyCapture.GetCapturedBytes()
-						if rawBytes == nil || len(rawBytes) == 0 {
-							return
-						}
-
-						logFields = append(logFields, zap.Int("raw_bytes_captured", len(rawBytes)))
-
-						// Safely create hex dump
-						if len(rawBytes) > 0 {
-							hexDump := fmt.Sprintf("%x", rawBytes)
-							if len(hexDump) > 200 {
-								hexDump = hexDump[:200] + "..."
-							}
-							logFields = append(logFields, zap.String("raw_bytes_hex", hexDump))
-
-							// Safely extract sample
-							sampleSize := min(len(rawBytes), 64)
-							if sampleSize > 0 && sampleSize <= len(rawBytes) {
-								sample := make([]byte, sampleSize)
-								copy(sample, rawBytes[:sampleSize])
-								logFields = append(logFields, zap.Binary("raw_bytes_sample", sample))
-							}
-						}
-
-						// Check for known compression signatures
-						if len(rawBytes) >= 4 {
-							sig := fmt.Sprintf("%x", rawBytes[:4])
-							var compressionType string
-							switch sig {
-							case "28b52ffd": // zstd magic number
-								compressionType = "zstd (valid header)"
-							case "1f8b0800", "1f8b0808": // gzip
-								compressionType = "gzip"
-							case "78da", "789c", "7801": // zlib/deflate
-								compressionType = "deflate"
-							default:
-								compressionType = fmt.Sprintf("unknown (sig: %s)", sig)
-							}
-							logFields = append(logFields, zap.String("detected_compression", compressionType))
-						}
-					}()
 				}
 
 				// Log the panic with stack trace, source IP, and user agent
@@ -533,16 +447,51 @@ func (r *libhoneyReceiver) handleEvent(resp http.ResponseWriter, req *http.Reque
 	var body []byte
 	var panicOccurred bool
 	var panicValue any
+	var decompressionType string
+
 	func() {
 		defer func() {
 			if panicVal := recover(); panicVal != nil {
 				panicOccurred = true
 				panicValue = panicVal
 				// Set error but don't log here - will be logged below with panic details
-				err = errors.New("failed to read request body: invalid compressed data")
+				err = errors.New("failed to read request body: decompression panic")
 			}
 		}()
-		body, err = io.ReadAll(req.Body)
+
+		contentEncoding := req.Header.Get("Content-Encoding")
+
+		// Manually decompress based on Content-Encoding header
+		body, decompressionType, err = decompressBody(req.Body, contentEncoding)
+		if err != nil {
+			return
+		}
+
+		// Detect if someone sent compressed data without Content-Encoding header
+		// This is a common misconfiguration
+		if len(body) >= 4 && contentEncoding == "" {
+			// Check for compression magic numbers
+			var possibleCompression string
+			switch {
+			case body[0] == 0x28 && body[1] == 0xb5 && body[2] == 0x2f && body[3] == 0xfd:
+				possibleCompression = "zstd"
+			case body[0] == 0x1f && body[1] == 0x8b:
+				possibleCompression = "gzip"
+			case body[0] == 0x78 && (body[1] == 0x9c || body[1] == 0xda || body[1] == 0x01):
+				possibleCompression = "deflate"
+			}
+
+			if possibleCompression != "" {
+				r.settings.Logger.Warn("Compressed data detected without Content-Encoding header - data not decompressed",
+					zap.String("detected_format", possibleCompression),
+					zap.String("endpoint", handlerEndpoint),
+					zap.String("source_ip", getSourceIP(req)),
+					zap.String("user_agent", req.Header.Get("User-Agent")),
+					zap.String("content_type", req.Header.Get("Content-Type")),
+					zap.Int("body_length", len(body)))
+				err = fmt.Errorf("compressed data sent without Content-Encoding header (detected: %s)", possibleCompression)
+			}
+		}
 	}()
 
 	if err != nil {
@@ -552,6 +501,7 @@ func (r *libhoneyReceiver) handleEvent(resp http.ResponseWriter, req *http.Reque
 			zap.String("source_ip", getSourceIP(req)),
 			zap.String("user_agent", req.Header.Get("User-Agent")),
 			zap.String("content-encoding", req.Header.Get("Content-Encoding")),
+			zap.String("decompression_type", decompressionType),
 			zap.String("content-type", req.Header.Get("Content-Type")),
 			zap.Int64("content-length", req.ContentLength),
 		}
