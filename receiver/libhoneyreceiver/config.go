@@ -24,6 +24,10 @@ type Config struct {
 	Wrapper        string                              `mapstructure:"wrapper"`
 	FieldMapConfig libhoneyevent.FieldMapConfig        `mapstructure:"fields"`
 
+	// DebugLogRawBytes enables logging of raw compressed bytes when decompression errors occur.
+	// This is useful for debugging but has performance overhead. Default: false
+	DebugLogRawBytes bool `mapstructure:"debug_log_raw_bytes"`
+
 	// prevent unkeyed literal initialization
 	_ struct{}
 }
@@ -34,6 +38,9 @@ type HTTPConfig struct {
 
 	// The URL path to receive traces on. If omitted "/" will be used.
 	TracesURLPaths []string `mapstructure:"traces_url_paths,omitempty"`
+
+	// Note: compression_algorithms field from ServerConfig is ignored.
+	// The receiver handles decompression internally for better error handling.
 
 	// prevent unkeyed literal initialization
 	_ struct{}
