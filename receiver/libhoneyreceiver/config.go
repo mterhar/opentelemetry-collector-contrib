@@ -19,14 +19,11 @@ import (
 
 // Config represents the receiver config settings within the collector's config.yaml
 type Config struct {
-	HTTP           configoptional.Optional[HTTPConfig] `mapstructure:"http"`
-	AuthAPI        string                              `mapstructure:"auth_api"`
-	Wrapper        string                              `mapstructure:"wrapper"`
-	FieldMapConfig libhoneyevent.FieldMapConfig        `mapstructure:"fields"`
-
-	// DebugLogRawBytes enables logging of raw compressed bytes when decompression errors occur.
-	// This is useful for debugging but has performance overhead. Default: false
-	DebugLogRawBytes bool `mapstructure:"debug_log_raw_bytes"`
+	HTTP                configoptional.Optional[HTTPConfig] `mapstructure:"http"`
+	AuthAPI             string                              `mapstructure:"auth_api"`
+	Wrapper             string                              `mapstructure:"wrapper"`
+	FieldMapConfig      libhoneyevent.FieldMapConfig        `mapstructure:"fields"`
+	VerboseErrorLogging bool                                `mapstructure:"verbose_error_logging"`
 
 	// prevent unkeyed literal initialization
 	_ struct{}

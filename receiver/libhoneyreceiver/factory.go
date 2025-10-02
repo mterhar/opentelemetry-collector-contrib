@@ -67,6 +67,7 @@ func createDefaultConfig() component.Config {
 				DurationFields: durationFieldsArr,
 			},
 		},
+		VerboseErrorLogging: true,
 	}
 }
 

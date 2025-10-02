@@ -475,14 +475,14 @@ func (r *libhoneyReceiver) handleEvent(resp http.ResponseWriter, req *http.Reque
 
 		// Manually decompress based on Content-Encoding header
 		// Only capture raw bytes if debug flag is enabled (performance overhead)
-		body, decompressionType, rawBytes, err = decompressBody(req.Body, contentEncoding, r.cfg.DebugLogRawBytes)
+		body, decompressionType, rawBytes, err = decompressBody(req.Body, contentEncoding, r.cfg.VerboseErrorLogging)
 		if err != nil {
 			return
 		}
 
 		// Detect if someone sent compressed data without Content-Encoding header
 		// This check is only enabled when debug flag is set (performance overhead)
-		if r.cfg.DebugLogRawBytes && len(body) >= 4 && contentEncoding == "" {
+		if r.cfg.VerboseErrorLogging && len(body) >= 4 && contentEncoding == "" {
 			// Check for compression magic numbers
 			var possibleCompression string
 			switch {
@@ -536,7 +536,7 @@ func (r *libhoneyReceiver) handleEvent(resp http.ResponseWriter, req *http.Reque
 		}
 
 		// Add raw bytes debug info if enabled and available
-		if r.cfg.DebugLogRawBytes && len(rawBytes) > 0 {
+		if r.cfg.VerboseErrorLogging && len(rawBytes) > 0 {
 			hexDump := fmt.Sprintf("%x", rawBytes)
 			if len(hexDump) > 200 {
 				hexDump = hexDump[:200] + "..."
